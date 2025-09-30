@@ -25,6 +25,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let lastStimulusOnsetTime = 0;
     let inFeedbackWindow = false;
     let startFeedbackAndAdvanceDelegate = null;
+    let errorFlashShownForCurrentTrial = false;
 
     // Deadlines for debug overlay
     let stimulusEndAt = 0;
@@ -104,24 +105,28 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (!currentTrialData.isTarget) {
                 document.body.classList.add('correct-flash');
-                setTimeout(() => { document.body.classList.remove('correct-flash'); }, 150);
+                setTimeout(() => { document.body.classList.remove('correct-flash'); }, config.errorFeedbackDurationMs);
             } else {
-                // Commission error: pressed on target → enter feedback and advance
-                if (startFeedbackAndAdvanceDelegate) { startFeedbackAndAdvanceDelegate(); }
+                // Commission error: show immediate red flash but do not advance; keep fixed trial timing
+                document.body.classList.add('error-flash');
+                errorFlashShownForCurrentTrial = true;
+                setTimeout(() => { document.body.classList.remove('error-flash'); }, config.errorFeedbackDurationMs);
             }
             return;
         }
 
-        // Case 2: Press during ISI → count for the previous stimulus
-        if (inIsiWindow && lastStimulusData && lastStimulusData.response === 'none') {
-            lastStimulusData.response = 'press';
-            lastStimulusData.rt = endTime - lastStimulusOnsetTime;
-            if (!lastStimulusData.isTarget) {
+        // Case 2: Press during ISI → count for the current trial (response window)
+        if (inIsiWindow && currentTrialData && currentTrialData.response === 'none') {
+            currentTrialData.response = 'press';
+            currentTrialData.rt = endTime - trialStartTime;
+            if (!currentTrialData.isTarget) {
                 document.body.classList.add('correct-flash');
-                setTimeout(() => { document.body.classList.remove('correct-flash'); }, 150);
+                setTimeout(() => { document.body.classList.remove('correct-flash'); }, config.errorFeedbackDurationMs);
             } else {
-                // Commission during ISI for previous target → feedback and advance
-                if (startFeedbackAndAdvanceDelegate) { startFeedbackAndAdvanceDelegate(); }
+                // Commission during ISI for current target → immediate red flash without advancing; keep fixed timing
+                document.body.classList.add('error-flash');
+                errorFlashShownForCurrentTrial = true;
+                setTimeout(() => { document.body.classList.remove('error-flash'); }, config.errorFeedbackDurationMs);
             }
         }
     });
@@ -133,42 +138,18 @@ document.addEventListener('DOMContentLoaded', () => {
         trialData = [];
 
         let hideStimulusTimeout = null;
-        let nextTrialTimeout = null;
-        let feedbackTimeout = null;
+        let responseEndTimeout = null;
+        let trialEndTimeout = null;
         inFeedbackWindow = false;
 
-        function startFeedbackAndAdvance() {
-            if (inFeedbackWindow) { return; }
-            // Clear any pending timeouts for the current trial
-            if (hideStimulusTimeout) { clearTimeout(hideStimulusTimeout); hideStimulusTimeout = null; }
-            if (nextTrialTimeout) { clearTimeout(nextTrialTimeout); nextTrialTimeout = null; }
-
-            // Enter feedback state and block input
-            inFeedbackWindow = true;
-            responseAllowed = false;
-            inIsiWindow = false;
-
-            // Hide stimulus during feedback
-            stimulusDisplay.textContent = '';
-
-            // Visual feedback
-            document.body.classList.add('error-flash');
-            setTimeout(() => { document.body.classList.remove('error-flash'); }, config.errorFeedbackDurationMs);
-
-            // Set debug deadline and schedule next trial after feedback
-            feedbackEndAt = performance.now() + config.errorFeedbackDurationMs;
-            feedbackTimeout = setTimeout(() => {
-                inFeedbackWindow = false;
-                processTrial();
-            }, config.errorFeedbackDurationMs);
-        }
-
-        // Expose delegate for global key handler
-        startFeedbackAndAdvanceDelegate = startFeedbackAndAdvance;
-
         function processTrial() {
-            // Push the previous trial's data (omission evaluated at ISI end)
+            // Push the previous trial's data
             if (trialIndex >= 0) { trialData.push(currentTrialData); }
+
+            // Clear any lingering timeouts from previous trial
+            if (hideStimulusTimeout) { clearTimeout(hideStimulusTimeout); hideStimulusTimeout = null; }
+            if (responseEndTimeout) { clearTimeout(responseEndTimeout); responseEndTimeout = null; }
+            if (trialEndTimeout) { clearTimeout(trialEndTimeout); trialEndTimeout = null; }
 
             trialIndex++;
             if (trialIndex >= trialSequence.length) { endRun(); return; }
@@ -176,6 +157,10 @@ document.addEventListener('DOMContentLoaded', () => {
             currentTrialData = trialSequence[trialIndex];
             responseAllowed = false;
             inIsiWindow = false;
+            inFeedbackWindow = false;
+            errorFlashShownForCurrentTrial = false;
+
+            // Present stimulus
             stimulusDisplay.textContent = String(currentTrialData.stimulus);
             trialStartTime = performance.now();
             responseAllowed = true;
@@ -183,22 +168,32 @@ document.addEventListener('DOMContentLoaded', () => {
             lastStimulusOnsetTime = trialStartTime;
             stimulusEndAt = trialStartTime + config.stimulusDurationMs;
 
-            // Hide stimulus after duration, then wait ISI and proceed to next trial
+            // 1) End stimulus, begin ISI
             hideStimulusTimeout = setTimeout(() => {
                 responseAllowed = false;
                 stimulusDisplay.textContent = '';
                 inIsiWindow = true;
                 isiEndAt = performance.now() + config.interStimulusIntervalMs;
-                nextTrialTimeout = setTimeout(() => {
-                    // End of ISI: check omission for non-targets with no response
-                    inIsiWindow = false;
-                    if (currentTrialData && !currentTrialData.isTarget && currentTrialData.response === 'none') {
-                        startFeedbackAndAdvance();
-                        return;
-                    }
-                    processTrial();
-                }, config.interStimulusIntervalMs);
             }, config.stimulusDurationMs);
+
+            // 2) End response window (stimulus + ISI). If error and not already flashed, show red for 300ms
+            responseEndTimeout = setTimeout(() => {
+                inIsiWindow = false;
+                const commission = currentTrialData.isTarget && currentTrialData.response === 'press';
+                const omission = !currentTrialData.isTarget && currentTrialData.response === 'none';
+                if ((commission || omission) && !errorFlashShownForCurrentTrial) {
+                    inFeedbackWindow = true;
+                    document.body.classList.add('error-flash');
+                    feedbackEndAt = performance.now() + config.errorFeedbackDurationMs;
+                    setTimeout(() => { document.body.classList.remove('error-flash'); }, config.errorFeedbackDurationMs);
+                }
+            }, config.stimulusDurationMs + config.interStimulusIntervalMs);
+
+            // 3) Fixed trial end at 1450ms total
+            trialEndTimeout = setTimeout(() => {
+                inFeedbackWindow = false;
+                processTrial();
+            }, config.stimulusDurationMs + config.interStimulusIntervalMs + config.errorFeedbackDurationMs);
         }
 
         // Start immediately with the first stimulus
@@ -206,8 +201,8 @@ document.addEventListener('DOMContentLoaded', () => {
         function endRun() {
             // Ensure all timers are cleared and state is consistent before switching screens
             if (hideStimulusTimeout) { clearTimeout(hideStimulusTimeout); hideStimulusTimeout = null; }
-            if (nextTrialTimeout) { clearTimeout(nextTrialTimeout); nextTrialTimeout = null; }
-            if (feedbackTimeout) { clearTimeout(feedbackTimeout); feedbackTimeout = null; }
+            if (responseEndTimeout) { clearTimeout(responseEndTimeout); responseEndTimeout = null; }
+            if (trialEndTimeout) { clearTimeout(trialEndTimeout); trialEndTimeout = null; }
             responseAllowed = false;
             inIsiWindow = false;
             inFeedbackWindow = false;
